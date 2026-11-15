@@ -21,3 +21,10 @@ jobs:
             https://www.axiondeepdigital.com/research/ai-visibility-study
           check: both
           fail-on: critical
+      - uses: ./
+        with:
+          urls: https://www.axiondeepdigital.com/las-cruces/seo
+          check: gap
+          viewport: mobile
+          headers: |
+            x-rendergap-self-test: 1

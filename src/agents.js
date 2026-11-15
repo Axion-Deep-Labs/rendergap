@@ -8,6 +8,9 @@
 export const BROWSER_UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 
+export const MOBILE_UA =
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
+
 export const AGENTS = [
   {
     id: "gptbot",
@@ -92,6 +95,6 @@ export const AGENTS = [
 ];
 
 export function findAgent(idOrToken) {
-  const k = String(idOrToken).toLowerCase();
+  const k = String(idOrToken || "").trim().toLowerCase();
   return AGENTS.find((a) => a.id === k || a.token.toLowerCase() === k);
 }

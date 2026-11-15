@@ -25,6 +25,14 @@ inputs:
     description: "Crawler check: fail when any crawler is blocked (true or false)"
     required: false
     default: "false"
+  viewport:
+    description: "desktop or mobile for the rendered side of the gap check"
+    required: false
+    default: "desktop"
+  headers:
+    description: "Extra request headers, one 'Name: value' per line (for example a preview bypass token from secrets)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -46,24 +54,32 @@ runs:
         RG_AGENT: ${{ inputs.agent }}
         RG_FAIL_ON: ${{ inputs.fail-on }}
         RG_FAIL_BLOCKED: ${{ inputs.fail-on-blocked }}
+        RG_VIEWPORT: ${{ inputs.viewport }}
+        RG_HEADERS: ${{ inputs.headers }}
         RG_BIN: ${{ github.action_path }}/bin/rendergap.js
       run: |
         if [ -x /usr/bin/google-chrome ]; then export CHROME_PATH=/usr/bin/google-chrome; fi
         export NO_COLOR=1
+        trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
+        hdr=()
+        while IFS= read -r h; do
+          h="$(trim "$h")"; [ -n "$h" ] && hdr+=(--header "$h")
+        done <<< "$RG_HEADERS"
+        summary() { { echo "<details open><summary>$1</summary>"; echo; echo '````text'; echo "$2"; echo '````'; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"; }
         status=0
         while IFS= read -r url; do
-          url="$(echo "$url" | xargs)"
+          url="$(trim "$url")"
           [ -z "$url" ] && continue
           if [ "$RG_CHECK" = "gap" ] || [ "$RG_CHECK" = "both" ]; then
-            out="$(node "$RG_BIN" "$url" --agent "$RG_AGENT" --fail-on "$RG_FAIL_ON")" || status=1
-            echo "$out"
-            { echo '```'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            code=0; out="$(node "$RG_BIN" "$url" --agent "$RG_AGENT" --fail-on "$RG_FAIL_ON" --viewport "$RG_VIEWPORT" "${hdr[@]}" 2>&1)" || code=$?
+            echo "$out"; summary "render gap: $url" "$out"
+            if [ "$code" -ne 0 ]; then status=1; fi
           fi
           if [ "$RG_CHECK" = "crawlers" ] || [ "$RG_CHECK" = "both" ]; then
             flag="never"; [ "$RG_FAIL_BLOCKED" = "true" ] && flag="blocked"
-            out="$(node "$RG_BIN" crawlers "$url" --fail-on "$flag")" || status=1
-            echo "$out"
-            { echo '```'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            code=0; out="$(node "$RG_BIN" crawlers "$url" --fail-on "$flag" "${hdr[@]}" 2>&1)" || code=$?
+            echo "$out"; summary "crawler access: $url" "$out"
+            if [ "$code" -ne 0 ]; then status=1; fi
           fi
         done <<< "$RG_URLS"
         exit $status

@@ -6,32 +6,55 @@
 // differ from what the real crawler gets, in either direction.
 
 import { AGENTS, BROWSER_UA } from "./agents.js";
-import { fetchRaw } from "./fetch.js";
+import { fetchRaw, xRobotsFor, splitCredentials } from "./fetch.js";
 import { parseRobots, isAllowed } from "./robots.js";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export async function checkCrawlers(url, { agents = AGENTS, timeoutMs, delayMs = 400 } = {}) {
+// Statuses that mean "this crawler is kept out". Used by --fail-on blocked.
+export const BLOCKED = new Set(["blocked-robots", "blocked-server", "challenged", "noindex-header"]);
+
+async function fetchWithBackoff(url, opts, { retries = 1, delayMs = 1500 } = {}) {
+  let res = await fetchRaw(url, opts);
+  for (let i = 0; i < retries && res.ok && res.status === 429; i++) {
+    const wait = Math.min(Number(res.retryAfter) * 1000 || delayMs, 10000);
+    await sleep(wait);
+    res = await fetchRaw(url, opts);
+  }
+  return res;
+}
+
+export async function checkCrawlers(url, { agents = AGENTS, timeoutMs, delayMs = 400, headers = {} } = {}) {
+  ({ url, headers } = splitCredentials(url, headers));
   const target = new URL(url);
   const pathWithQuery = target.pathname + target.search;
   const robotsUrl = new URL("/robots.txt", target).href;
 
-  const robotsRes = await fetchRaw(robotsUrl, { userAgent: BROWSER_UA, timeoutMs });
-  let robots = { url: robotsUrl, status: robotsRes.ok ? robotsRes.status : null, error: robotsRes.error };
-  let groups = [];
-  if (robotsRes.ok && robotsRes.status >= 200 && robotsRes.status < 300) {
-    groups = parseRobots(robotsRes.body);
-  } else if (robotsRes.ok && robotsRes.status >= 500) {
-    // RFC 9309: an unreachable robots.txt (5xx) means assume complete disallow.
-    robots.note = "robots.txt returned a server error; crawlers treat that as disallow all";
-    groups = parseRobots("User-agent: *\nDisallow: /");
-  }
+  const robotsRes = await fetchRaw(robotsUrl, { userAgent: BROWSER_UA, timeoutMs, headers });
+  const robots = { url: robotsUrl, status: robotsRes.ok ? robotsRes.status : null, error: robotsRes.error };
+  const groups = robotsGroups(robotsRes, robots);
+  // Real crawlers request robots.txt with their own user agent, and some servers answer
+  // differently. Fetch it as each crawler and use that version when it differs.
+  const robotsByUa = new Map();
 
-  const baseline = await fetchRaw(url, { userAgent: BROWSER_UA, timeoutMs });
+  const baseline = await fetchWithBackoff(url, { userAgent: BROWSER_UA, timeoutMs, headers });
   const results = [];
 
   for (const agent of agents) {
-    const verdict = isAllowed(groups, agent.token, pathWithQuery);
+    let agentGroups = groups;
+    if (agent.fetchable !== false) {
+      const r = await fetchRaw(robotsUrl, { userAgent: agent.ua, timeoutMs, headers });
+      if (r.ok) {
+        const info = {};
+        const g = robotsGroups(r, info);
+        // Compare parsed rules, not bytes: a timestamp comment should not count as a difference.
+        if (r.status !== robotsRes.status || JSON.stringify(g) !== JSON.stringify(groups)) {
+          agentGroups = g;
+          robotsByUa.set(agent.token, { status: r.status, ...info });
+        }
+      }
+    }
+    const verdict = isAllowed(agentGroups, agent.token, pathWithQuery);
     const row = {
       id: agent.id,
       token: agent.token,
@@ -46,15 +69,25 @@ export async function checkCrawlers(url, { agents = AGENTS, timeoutMs, delayMs =
       continue;
     }
     await sleep(delayMs);
-    const res = await fetchRaw(url, { userAgent: agent.ua, timeoutMs });
+    const res = await fetchWithBackoff(url, { userAgent: agent.ua, timeoutMs, headers });
     row.http = res.ok
-      ? { status: res.status, bytes: res.bytes, challenge: res.challenge, xRobotsTag: res.xRobotsTag, ms: res.ms }
+      ? {
+          status: res.status,
+          bytes: res.bytes,
+          challenge: res.challenge,
+          xRobotsTag: res.xRobotsTag,
+          finalUrl: res.finalUrl,
+          ms: res.ms,
+        }
       : { error: res.error, ms: res.ms };
-    row.status = classify(verdict, res, baseline);
+    row.status = classify(verdict, res, baseline, agent.token);
+    if (robotsByUa.has(agent.token)) row.robotsDiffers = robotsByUa.get(agent.token);
     results.push(row);
   }
 
+  if (robotsByUa.size) robots.note = [robots.note, `robots.txt is different for: ${[...robotsByUa.keys()].join(", ")}`].filter(Boolean).join("; ");
   return {
+    version: 1,
     url,
     robots,
     baseline: baseline.ok
@@ -64,14 +97,37 @@ export async function checkCrawlers(url, { agents = AGENTS, timeoutMs, delayMs =
   };
 }
 
-export function classify(verdict, res, baseline) {
+function robotsGroups(res, info) {
+  if (res.ok && res.status >= 200 && res.status < 300) {
+    if (/^\s*</.test(res.body) && /<html/i.test(res.body.slice(0, 2000))) {
+      info.note = "robots.txt returned an HTML page, so no rules apply";
+      return [];
+    }
+    return parseRobots(res.body);
+  }
+  if (res.ok && (res.status >= 500 || res.status === 429)) {
+    // RFC 9309: an unreachable robots.txt means assume complete disallow.
+    info.note = `robots.txt returned HTTP ${res.status}; crawlers treat that as disallow all`;
+    return parseRobots("User-agent: *\nDisallow: /");
+  }
+  if (res.ok) {
+    info.note = `robots.txt returned HTTP ${res.status}; that means no rules, everything allowed`;
+    return [];
+  }
+  info.note = "robots.txt could not be fetched";
+  return [];
+}
+
+export function classify(verdict, res, baseline, token = "") {
   if (!verdict.allowed) return "blocked-robots";
   if (!res.ok) return "error";
-  const baseOk = baseline.ok && baseline.status < 400;
-  if (res.status >= 400 && baseOk) return "blocked-server";
-  if (res.challenge && !(baseline.ok && baseline.challenge)) return "challenged";
-  if (res.status >= 400) return "error";
-  if (/noindex|none/i.test(res.xRobotsTag)) return "noindex-header";
+  const baseOk = baseline.ok && baseline.status < 400 && !baseline.challenge;
+  if (res.status === 429) return "rate-limited";
+  if (!baseOk && (res.status >= 400 || res.challenge)) return "inconclusive";
+  if (res.status >= 400) return "blocked-server";
+  if (res.challenge) return "challenged";
+  const directives = xRobotsFor(res.xRobotsTag, token);
+  if (directives.includes("noindex") || directives.includes("none")) return "noindex-header";
   if (baseOk && baseline.bytes > 2000 && res.bytes < baseline.bytes * 0.2) return "different-response";
   return "allowed";
 }
@@ -83,5 +139,7 @@ export const STATUS_TEXT = {
   challenged: "sent a bot challenge",
   "noindex-header": "served with X-Robots-Tag noindex",
   "different-response": "got a much smaller response than a browser",
+  "rate-limited": "rate limited (HTTP 429), try again later",
+  inconclusive: "inconclusive: a normal browser request was blocked too",
   error: "request failed",
 };
