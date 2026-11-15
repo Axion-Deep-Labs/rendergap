@@ -11,6 +11,8 @@
     "src",
     "action.yml",
     "README.md",
+    "SECURITY.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
