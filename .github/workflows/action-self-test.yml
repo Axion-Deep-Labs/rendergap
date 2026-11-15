@@ -1,0 +1,23 @@
+name: action self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          urls: |
+            https://www.axiondeepdigital.com/
+            https://www.axiondeepdigital.com/research/ai-visibility-study
+          check: both
+          fail-on: critical
