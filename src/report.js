@@ -13,8 +13,10 @@ const MARK = { critical: red("CRITICAL"), warning: yellow("WARNING "), info: dim
 export function formatGap(r) {
   const out = [];
   out.push(bold(`rendergap: ${r.url}`));
-  out.push(dim(`raw fetch as ${r.agent}: HTTP ${r.raw.status}, ${r.raw.bytes} bytes, ${r.raw.signals.wordCount} words`));
-  out.push(dim(`rendered in Chrome:   HTTP ${r.rendered.status}, ${r.rendered.signals.wordCount} words`));
+  const words = r.raw.signals ? `, ${r.raw.signals.wordCount} words` : "";
+  out.push(dim(r.raw.error ? `raw fetch as ${r.agent}: failed` : `raw fetch as ${r.agent}: HTTP ${r.raw.status}, ${r.raw.bytes} bytes${words}`));
+  if (r.rendered) out.push(dim(`rendered in Chrome (${r.viewport}): HTTP ${r.rendered.status}, ${r.rendered.signals.wordCount} words`));
+  for (const n of r.notes || []) out.push(dim(`note: ${n}`));
   out.push("");
   if (!r.findings.length) {
     out.push(green("No gap found. What a browser shows is also in the raw HTML."));
@@ -47,6 +49,7 @@ export function formatCrawlers(r) {
     else if (x.http?.error) detail = ` (${x.http.error})`;
     else if (x.note) detail = ` (${x.note})`;
     out.push(`${x.token.padEnd(width)}  ${colored}${dim(detail)}`);
+    if (x.robotsDiffers) out.push(dim(`${"".padEnd(width)}  robots.txt served to this crawler differs from the browser's (HTTP ${x.robotsDiffers.status})`));
   }
   out.push("");
   out.push(dim("Requests come from your IP with each crawler's user agent. Firewalls that verify crawlers by IP may treat the real crawler differently."));

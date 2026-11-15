@@ -1,6 +1,6 @@
 {
   "name": "rendergap",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "See what AI crawlers miss on your page: compare raw HTML with the rendered page, and check which crawlers can reach it at all.",
   "type": "module",
   "bin": {
