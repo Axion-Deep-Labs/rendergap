@@ -1,8 +1,8 @@
 # rendergap
 
-See what AI crawlers miss on your page.
+See what a non-JavaScript crawler receives from your page, what only appears after rendering, and whether major crawler user agents are blocked.
 
-Several major AI crawlers have been documented fetching pages without running JavaScript, and behavior varies by crawler. When a site builds its headings, prices, phone number or structured data in the browser, a crawler that reads only the first HTML response gets a thinner page than your visitors do. rendergap shows you that difference, and checks whether each crawler can reach the page at all.
+Several major AI crawlers have been documented fetching pages without running JavaScript, and behavior varies by crawler. Some servers also send crawlers different HTML than they send browsers. When a site builds its headings, prices, phone number or structured data in the browser, or serves bots a thinner page, a crawler that reads only the first HTML response gets less than your visitors do. rendergap measures both causes separately, and checks whether each crawler can reach the page at all.
 
 In our study of 368 small business websites, 92 lost at least one answer-critical element between the rendered page and the raw HTML ([method and data](https://www.axiondeepdigital.com/research/ai-visibility-study)). This is the check we used, packaged so you can run it on your own pages and in CI.
 
@@ -25,30 +25,43 @@ CHROME_PATH=/usr/bin/google-chrome rendergap https://example.com
 rendergap https://example.com/services
 ```
 
-rendergap fetches the page the way a crawler does (plain HTTP, the crawler's user agent, no JavaScript), then loads it in headless Chrome like a visitor. Both sides go through the same extractor, so the comparison is like for like. It reports what the rendered page has that the raw HTML does not:
+rendergap takes three readings of the same URL and reads each one with the same extractor:
 
-| Signal | Severity when missing from raw HTML |
+| Reading | What it is |
+|---|---|
+| A, crawler HTML | Plain HTTP request with the crawler's user agent, no JavaScript |
+| B, browser HTML | Plain HTTP request with a real Chrome user agent and client hints, no JavaScript |
+| C, rendered page | Headless Chrome with JavaScript on, scrolled, settled |
+
+Comparing **A with B** shows how the server treats the crawler. Comparing **B with C** shows what JavaScript adds. Keeping them apart matters: if a server simply sends GPTBot a thinner page, that is not a rendering problem, and rendergap will not call it one. If bot protection blocks the plain browser request (B), rendergap says the two causes could not be separated and compares A with C directly.
+
+| Signal | Severity when missing |
 |---|---|
 | Title, canonical, H1, structured data (JSON-LD types), phone numbers | critical |
-| Canonical or meta robots changed by JavaScript | critical |
-| Raw HTML holds under half the rendered text | critical |
+| Canonical or meta robots that differ between readings | critical |
+| Under half the text of the later reading | critical |
 | H2 headings, meta description, prices, email links, FAQ items | warning |
-| Forms, individual text blocks, links with no accessible name | info |
+| The crawler and browser end on different URLs | warning |
+| Forms, individual text blocks, links with no accessible name, a crawler that gets more text than browsers | info |
 
 ```
 rendergap: https://example.com/
-raw fetch as GPTBot: HTTP 200, 1840 bytes, 3 words
-rendered in Chrome:   HTTP 200, 412 words
+GPTBot HTML: HTTP 200, 1840 bytes, 96 words
+browser HTML: HTTP 200, 6120 bytes, 288 words
+rendered page (desktop): HTTP 200, 412 words
+GPTBot's HTML carries 23% of the text a visitor sees (96 of 412 words).
 
-CRITICAL  Page title only appears after JavaScript runs.
-          - Acme Plumbing | Las Cruces
-CRITICAL  H1 text missing from the raw HTML.
+How the server treats GPTBot (its HTML vs a browser's HTML, both before JavaScript)
+CRITICAL  H1 text missing from the HTML sent to GPTBot, though browsers get it.
           - Acme Plumbing in Las Cruces
-CRITICAL  Structured data types only present after JavaScript runs.
-          - Plumber
-CRITICAL  Phone numbers only visible after JavaScript runs.
+CRITICAL  A phone number is in the HTML sent to browsers but not in the HTML sent to GPTBot.
           - (575) 555-0100
-CRITICAL  Raw HTML carries 1% of the rendered text (3 of 412 words).
+CRITICAL  The HTML sent to GPTBot carries 33% of the text browsers get (96 of 288 words).
+
+What JavaScript adds (browser HTML vs the rendered page)
+WARNING   Pricing only appears after JavaScript runs.
+          - $129
+          - $1,450
 ```
 
 Options:
@@ -56,7 +69,9 @@ Options:
 - `--agent <name>` the crawler whose raw fetch to compare. Default `gptbot`.
 - `--fail-on <level>` exit 1 when a finding is at least `critical` (default), `warning` or `info`. Use `never` to always exit 0.
 - `--viewport mobile` render the page as a phone instead of a desktop browser.
-- `--header "Name: value"` send an extra header on every request, repeatable. Use it for preview deployments behind a bypass token. Credentials in the URL (`https://user:pass@staging.example.com/`) are sent as basic auth and never printed.
+- `--header "Name: value"` send an extra header, repeatable. Use it for preview deployments behind a bypass token. Credentials in the URL (`https://user:pass@staging.example.com/`) are sent as basic auth and never printed.
+
+**Custom headers and URL credentials only ever go to the origin you are checking.** They are added per request, never to third-party scripts, fonts, analytics or images the page loads, and they are dropped the moment a redirect leaves that origin. `test/leak.test.js` runs a second server on another origin and fails if a secret ever reaches it.
 - `--json` machine-readable output.
 - `--timeout <ms>` page load timeout.
 
@@ -104,9 +119,11 @@ Results are printed to the log and to the job summary.
 
 ## How the comparison works
 
-- **Raw side:** the HTTP response body for the crawler's user agent, loaded into Chrome with JavaScript disabled and every subresource blocked. Nothing runs, nothing loads.
-- **Rendered side:** a normal page load with a desktop browser user agent, waiting for the network to go quiet, then one more second.
-- **Extraction:** one function reads both sides: title, meta tags, canonical, headings, JSON-LD types, phone numbers (tel links and visible text), email links, prices, FAQ items, forms, word count and text blocks.
+- **Crawler HTML (A):** the HTTP response for the crawler's user agent, loaded into Chrome with JavaScript disabled and every subresource blocked. Nothing runs, nothing loads.
+- **Browser HTML (B):** the same, with the user agent and client hints of the Chrome that renders C, so A and B differ only in user agent, and B and C differ only in JavaScript.
+- **Rendered page (C):** a normal page load, waiting for the network to go quiet, scrolling to trigger lazy content, then one more second.
+- **Extraction:** one function reads all three: title, meta tags, canonical, headings, JSON-LD types, phone numbers (tel links and visible text), email links, prices, FAQ items, forms, word count and text blocks.
+- **JSON output** (`--json`, version 2) includes all three readings, every finding tagged with its `layer` (`server`, `render`, `combined` or `access`), and a `summary` with word counts.
 
 ## What it is built to survive
 
@@ -122,7 +139,7 @@ Real pages fight tools. Each of these has a test in `test/hostile.test.js`, and 
 - Pages that never go network-idle are read as loaded. Every in-page step has a deadline and the CLI has a hard ceiling, so a CI job cannot hang.
 - When the crawler is blocked, served a challenge, sent a PDF or caught in a redirect loop, that is the finding. You do not get a page of false "missing content" noise.
 - JavaScript and meta refresh redirects are flagged, since the crawler and the browser are then reading different pages.
-- robots.txt follows RFC 9309: exact product-token matching, longest match wins, `*` and `$` patterns, percent-encoding, byte order marks, and "server error means disallow all".
+- robots.txt parsing passes a port of the conformance cases from [Google's open-source robots.txt parser](https://github.com/google/robotstxt) (`test/conformance.test.js`), with the one deliberate difference documented in that file. It follows RFC 9309: exact product-token matching, longest match wins, `*` and `$` patterns, percent-encoding, byte order marks, and "server error means disallow all".
 
 Findings are about what is present, not whether a crawler ranks or cites you. A clean report means your content is in the first HTML response. It does not mean an AI system will recommend you.
 

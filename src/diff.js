@@ -1,76 +1,105 @@
-// Compare signals from the raw HTML against the rendered page.
-// A finding is something a person sees on the rendered page that a fetch without
-// JavaScript does not get.
+// Compare the signals of two readings of the same page.
+//
+// rendergap takes three readings:
+//   A  the HTML the crawler's user agent receives (no JavaScript)
+//   B  the HTML a normal browser receives (no JavaScript)
+//   C  the page a browser shows after JavaScript runs
+// compare(A, B, serverVoice) isolates how the server treats the crawler.
+// compare(B, C, renderVoice) isolates what JavaScript adds.
+// Each finding is something present in the later reading and absent from the earlier one.
 
 const SEVERITY = { critical: 3, warning: 2, info: 1 };
 
-function missingFrom(rawList, renderedList) {
-  const raw = new Set(rawList.map((s) => s.toLowerCase()));
-  return renderedList.filter((s) => !raw.has(s.toLowerCase()));
+export const renderVoice = {
+  layer: "render",
+  only: (what, plural) => `${what} only ${plural ? "appear" : "appears"} after JavaScript runs.`,
+  missing: (what) => `${what} missing from the HTML before JavaScript runs.`,
+  changed: (what) => `JavaScript changes the ${what}.`,
+  ratio: (pct, a, b) => `The HTML before JavaScript carries ${pct}% of the rendered text (${a} of ${b} words).`,
+  from: "before JS",
+  to: "after JS",
+};
+
+export function serverVoice(token) {
+  return {
+    layer: "server",
+    only: (what, plural) => `${what} ${plural ? "are" : "is"} in the HTML sent to browsers but not in the HTML sent to ${token}.`,
+    missing: (what) => `${what} missing from the HTML sent to ${token}, though browsers get it.`,
+    changed: (what) => `The server sends ${token} a different ${what} than it sends browsers.`,
+    ratio: (pct, a, b) => `The HTML sent to ${token} carries ${pct}% of the text browsers get (${a} of ${b} words).`,
+    from: token,
+    to: "browser",
+  };
 }
 
-export function compare(raw, rendered) {
+function missingFrom(earlier, later) {
+  const seen = new Set(earlier.map((s) => s.toLowerCase()));
+  return later.filter((s) => !seen.has(s.toLowerCase()));
+}
+
+export function compare(a, b, voice = renderVoice) {
   const findings = [];
   const add = (severity, signal, message, items) =>
-    findings.push({ severity, signal, message, ...(items && items.length ? { items } : {}) });
+    findings.push({ severity, layer: voice.layer, signal, message, ...(items && items.length ? { items } : {}) });
 
-  if (!raw.title && rendered.title) add("critical", "title", "Page title only appears after JavaScript runs.", [rendered.title]);
-  else if (raw.title && rendered.title && raw.title !== rendered.title)
-    add("info", "title", "JavaScript changes the page title.", [`raw: ${raw.title}`, `rendered: ${rendered.title}`]);
+  if (!a.title && b.title) add("critical", "title", voice.only("The page title"), [b.title]);
+  else if (a.title && b.title && a.title !== b.title)
+    add("info", "title", voice.changed("page title"), [`${voice.from}: ${a.title}`, `${voice.to}: ${b.title}`]);
 
-  if (!raw.metaDescription && rendered.metaDescription)
-    add("warning", "metaDescription", "Meta description only appears after JavaScript runs.");
+  if (!a.metaDescription && b.metaDescription) add("warning", "metaDescription", voice.only("The meta description"));
 
-  if (!raw.canonical && rendered.canonical)
-    add("critical", "canonical", "Canonical link only appears after JavaScript runs.", [rendered.canonical]);
-  else if (raw.canonical && rendered.canonical && raw.canonical !== rendered.canonical)
-    add("critical", "canonical", "JavaScript changes the canonical URL.", [`raw: ${raw.canonical}`, `rendered: ${rendered.canonical}`]);
+  if (!a.canonical && b.canonical) add("critical", "canonical", voice.only("The canonical link"), [b.canonical]);
+  else if (a.canonical && b.canonical && a.canonical !== b.canonical)
+    add("critical", "canonical", voice.changed("canonical URL"), [`${voice.from}: ${a.canonical}`, `${voice.to}: ${b.canonical}`]);
 
-  if (raw.metaRobots !== rendered.metaRobots && /noindex/i.test(raw.metaRobots + rendered.metaRobots))
-    add("critical", "metaRobots", "Meta robots differs between raw and rendered, and one side says noindex.",
-      [`raw: ${raw.metaRobots || "(none)"}`, `rendered: ${rendered.metaRobots || "(none)"}`]);
+  if (a.metaRobots !== b.metaRobots && /noindex/i.test(a.metaRobots + b.metaRobots))
+    add("critical", "metaRobots", voice.changed("meta robots tag") + " One side says noindex.",
+      [`${voice.from}: ${a.metaRobots || "(none)"}`, `${voice.to}: ${b.metaRobots || "(none)"}`]);
 
-  const h1 = missingFrom(raw.h1, rendered.h1);
-  if (h1.length) add(raw.h1.length ? "warning" : "critical", "h1", "H1 text missing from the raw HTML.", h1);
+  const h1 = missingFrom(a.h1, b.h1);
+  if (h1.length) add(a.h1.length ? "warning" : "critical", "h1", voice.missing("H1 text"), h1);
 
-  const h2 = missingFrom(raw.h2, rendered.h2);
-  if (h2.length) add("warning", "h2", `${h2.length} of ${rendered.h2.length} H2 headings are missing from the raw HTML.`, h2.slice(0, 15));
+  const h2 = missingFrom(a.h2, b.h2);
+  if (h2.length) add("warning", "h2", voice.missing(`${h2.length} of ${b.h2.length} H2 headings`), h2.slice(0, 15));
 
-  const ld = missingFrom(raw.jsonLdTypes, rendered.jsonLdTypes);
-  if (ld.length) add("critical", "jsonLd", "Structured data types only present after JavaScript runs.", ld);
+  const ld = missingFrom(a.jsonLdTypes, b.jsonLdTypes);
+  if (ld.length) add("critical", "jsonLd", voice.only("Structured data"), ld);
 
-  const phones = missingFrom(raw.phones, rendered.phones);
-  if (phones.length) add("critical", "phone", "Phone numbers only visible after JavaScript runs.", phones.map(fmtPhone));
+  const phones = missingFrom(a.phones, b.phones);
+  if (phones.length) add("critical", "phone", voice.only("A phone number"), phones.map(fmtPhone));
 
-  const emails = missingFrom(raw.emails, rendered.emails);
-  if (emails.length) add("warning", "email", "Email links only present after JavaScript runs.", emails);
+  const emails = missingFrom(a.emails, b.emails);
+  if (emails.length) add("warning", "email", voice.only("An email link"), emails);
 
-  const prices = missingFrom(raw.prices, rendered.prices);
-  if (prices.length) add("warning", "prices", "Prices only visible after JavaScript runs.", prices.slice(0, 15));
+  const prices = missingFrom(a.prices, b.prices);
+  if (prices.length) add("warning", "prices", voice.only("Pricing"), prices.slice(0, 15));
 
-  if (rendered.faqItems > raw.faqItems)
-    add("warning", "faq", `${rendered.faqItems - raw.faqItems} FAQ items (details/summary) only appear after JavaScript runs.`);
+  if (b.faqItems > a.faqItems) {
+    const n = b.faqItems - a.faqItems;
+    add("warning", "faq", voice.only(n === 1 ? "1 FAQ item" : `${n} FAQ items`, n !== 1));
+  }
 
-  if (rendered.forms > raw.forms)
-    add("info", "forms", `${rendered.forms - raw.forms} form(s) only appear after JavaScript runs.`);
+  if (b.forms > a.forms) {
+    const n = b.forms - a.forms;
+    add("info", "forms", voice.only(n === 1 ? "1 form" : `${n} forms`, n !== 1));
+  }
 
-  const ratio = rendered.wordCount ? raw.wordCount / rendered.wordCount : 1;
-  if (rendered.wordCount >= 50 && ratio < 0.5)
-    add("critical", "content", `Raw HTML carries ${Math.round(ratio * 100)}% of the rendered text (${raw.wordCount} of ${rendered.wordCount} words).`);
-  else if (rendered.wordCount >= 50 && ratio < 0.8)
-    add("warning", "content", `Raw HTML carries ${Math.round(ratio * 100)}% of the rendered text (${raw.wordCount} of ${rendered.wordCount} words).`);
+  const ratio = b.wordCount ? a.wordCount / b.wordCount : 1;
+  const pct = Math.round(ratio * 100);
+  if (b.wordCount >= 50 && ratio < 0.5) add("critical", "content", voice.ratio(pct, a.wordCount, b.wordCount));
+  else if (b.wordCount >= 50 && ratio < 0.8) add("warning", "content", voice.ratio(pct, a.wordCount, b.wordCount));
 
-  const rawBlocks = new Set(raw.blocks);
-  const lostBlocks = rendered.blocks.filter((b) => !rawBlocks.has(b));
-  if (lostBlocks.length && rendered.blocks.length)
-    add(lostBlocks.length / rendered.blocks.length > 0.3 ? "warning" : "info", "blocks",
-      `${lostBlocks.length} of ${rendered.blocks.length} text blocks are not in the raw HTML.`,
-      lostBlocks.slice(0, 5).map((b) => (b.length > 140 ? b.slice(0, 137) + "..." : b)));
+  const earlierBlocks = new Set(a.blocks);
+  const lostBlocks = b.blocks.filter((x) => !earlierBlocks.has(x));
+  if (lostBlocks.length && b.blocks.length)
+    add(lostBlocks.length / b.blocks.length > 0.3 ? "warning" : "info", "blocks",
+      voice.missing(`${lostBlocks.length} of ${b.blocks.length} text blocks`),
+      lostBlocks.slice(0, 5).map((x) => (x.length > 140 ? x.slice(0, 137) + "..." : x)));
 
-  if (rendered.unnamedLinks > 0)
-    add("info", "unnamedLinks", `${rendered.unnamedLinks} link(s) on the rendered page have no accessible name.`);
+  if (voice.layer === "render" && b.unnamedLinks > 0)
+    add("info", "unnamedLinks", `${b.unnamedLinks} link(s) on the rendered page have no accessible name.`);
 
-  findings.sort((a, b) => SEVERITY[b.severity] - SEVERITY[a.severity]);
+  findings.sort((x, y) => SEVERITY[y.severity] - SEVERITY[x.severity]);
   return findings;
 }
 
