@@ -143,6 +143,10 @@ Real pages fight tools. Each of these has a test in `test/hostile.test.js`, and 
 
 Findings are about what is present, not whether a crawler ranks or cites you. A clean report means your content is in the first HTML response. It does not mean an AI system will recommend you.
 
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability and for past advisories. Versions before 0.3.0 could send custom headers beyond the checked origin; upgrade, and rotate any secret you passed that way.
+
 ## Contributing
 
 Issues and pull requests are welcome. Run the tests with `npm test`. The end-to-end tests need a Chrome (`CHROME_PATH` or the Puppeteer download) and skip without one.
