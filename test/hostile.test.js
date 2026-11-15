@@ -125,6 +125,44 @@ setTimeout(() => { for (;;) {} }, 300);
 document.getElementById("x").innerHTML = "<h2>Service area</h2><p>Las Cruces, Mesilla, Organ and the rest of Dona Ana County, same day.</p>";
 </script>`)),
 
+  // No JavaScript anywhere: the server simply sends GPTBot a thinner page.
+  "/uacloak": (req, res) => {
+    if (/GPTBot/.test(req.headers["user-agent"])) return html(res, page(`<p>${PARA}</p>`));
+    html(res, page(STATIC_BODY + `<p>${PARA} Again.</p>`.repeat(6)));
+  },
+
+  // Both problems at once: thinner HTML for GPTBot, and pricing added by JavaScript.
+  "/both": (req, res) => {
+    const js = `<div id="p"></div><script>document.getElementById("p").innerHTML = "<p>Drain cleaning starts at $129 and includes a camera inspection of the main line.</p>";</script>`;
+    if (/GPTBot/.test(req.headers["user-agent"])) return html(res, page(`<p>${PARA}</p>${js}`));
+    html(res, page(STATIC_BODY + js));
+  },
+
+  // A JavaScript challenge, the way Cloudflare-style walls work: known crawlers pass,
+  // anything else must run a script that sets a cookie and reloads. A plain fetch
+  // never passes; a real browser does.
+  "/fingerprint": (req, res) => {
+    const ua = req.headers["user-agent"] || "";
+    if (/bot/i.test(ua) || /(^|;\s*)cf=ok/.test(req.headers.cookie || "")) return html(res, page(STATIC_BODY));
+    html(res, `<!doctype html><html><head><title>Just a moment...</title></head><body><script>document.cookie = "cf=ok; path=/"; location.reload();</script></body></html>`);
+  },
+
+  // Anything claiming to be Chrome without Chrome's client hints is refused.
+  "/hints": (req, res) => {
+    const ua = req.headers["user-agent"] || "";
+    if (/Chrome\//.test(ua) && !/bot/i.test(ua) && !/Chrom/.test(req.headers["sec-ch-ua"] || "")) {
+      res.writeHead(403, { "content-type": "text/html" });
+      return res.end("<title>Denied</title>");
+    }
+    html(res, page(STATIC_BODY));
+  },
+
+  // The crawler gets more than browsers do.
+  "/extraforbots": (req, res) => {
+    if (/GPTBot/.test(req.headers["user-agent"])) return html(res, page(STATIC_BODY + `<p>${PARA} Bonus.</p>`.repeat(10)));
+    html(res, page(STATIC_BODY + `<p>${PARA} Shared.</p>`));
+  },
+
   // A bakery's real "cookies" section, added by JS: this IS content.
   "/bakery": (req, res) =>
     html(res, page(`<p>${PARA}</p><div id="menu"></div><script>
@@ -214,10 +252,14 @@ before(async () => {
     (routes[path] || ((q, r) => { r.writeHead(404); r.end(); }))(req, res);
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  server.unref();
   origin = `http://127.0.0.1:${server.address().port}`;
 });
 
-after(() => server.closeAllConnections?.() ?? server.close());
+after(() => {
+  server?.closeAllConnections?.();
+  server?.close();
+});
 
 async function hasChrome() {
   if (process.env.CHROME_PATH) return existsSync(process.env.CHROME_PATH);
@@ -466,4 +508,55 @@ test("gap: a debugger statement in site code does not pause the check", async (t
   const r = await gap("/debugger");
   assert.ok(Date.now() - started < 20000, "paused on debugger statement");
   assert.ok(r.findings.some((f) => f.signal === "h2"), JSON.stringify(r.findings));
+});
+
+const layers = (r) => [...new Set(r.findings.map((f) => f.layer))].sort();
+
+test("three-way: a server-side difference is not blamed on JavaScript", async (t) => {
+  if (!(await hasChrome())) return t.skip("no Chrome");
+  const r = await gap("/uacloak");
+  assert.deepEqual(layers(r), ["server"], JSON.stringify(r.findings));
+  for (const sig of ["h1", "phone", "content"]) assert.ok(r.findings.some((f) => f.signal === sig), sig);
+  assert.match(r.findings.find((f) => f.signal === "phone").message, /sent to GPTBot/);
+});
+
+test("three-way: a JavaScript-only gap is not blamed on the server", async (t) => {
+  if (!(await hasChrome())) return t.skip("no Chrome");
+  const r = await gap("/lazy");
+  assert.deepEqual(layers(r), ["render"], JSON.stringify(r.findings));
+});
+
+test("three-way: both causes are reported separately", async (t) => {
+  if (!(await hasChrome())) return t.skip("no Chrome");
+  const r = await gap("/both");
+  assert.deepEqual(layers(r), ["render", "server"], JSON.stringify(r.findings));
+  assert.ok(r.findings.some((f) => f.layer === "server" && f.signal === "phone"));
+  assert.ok(r.findings.some((f) => f.layer === "render" && f.signal === "prices"));
+  assert.ok(!r.findings.some((f) => f.layer === "server" && f.signal === "prices"), "JS-added prices must not count as a server difference");
+  assert.ok(r.summary.crawlerShareOfRendered < 100);
+});
+
+test("three-way: when the plain browser fetch is blocked, it says the causes are not separated", async (t) => {
+  if (!(await hasChrome())) return t.skip("no Chrome");
+  const r = await gap("/fingerprint");
+  assert.equal(r.raw.status, 200, "GPTBot should get through");
+  assert.equal(r.browserHtml.usable, false);
+  assert.equal(r.rendered.status, 200, "real Chrome should get through");
+  assert.ok(r.notes.some((n) => /could not be separated/.test(n)), JSON.stringify(r.notes));
+  assert.ok(r.findings.every((f) => f.layer === "combined"), JSON.stringify(r.findings));
+});
+
+test("three-way: a crawler that gets extra text is noted", async (t) => {
+  if (!(await hasChrome())) return t.skip("no Chrome");
+  const r = await gap("/extraforbots");
+  assert.ok(r.findings.some((f) => f.signal === "extraForCrawler"), JSON.stringify(r.findings));
+});
+
+test("rendered and plain browser requests carry matching client hints", async (t) => {
+  if (!(await hasChrome())) return t.skip("no Chrome");
+  for (const viewport of ["desktop", "mobile"]) {
+    const r = await gap("/hints", { viewport });
+    assert.equal(r.rendered.status, 200, viewport);
+    assert.equal(r.browserHtml.status, 200, viewport);
+  }
 });

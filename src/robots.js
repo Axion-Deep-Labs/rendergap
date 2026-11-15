@@ -3,45 +3,67 @@
 // - within a group, the longest matching rule wins; on a tie, allow wins
 // - "*" matches any run of characters, a trailing "$" anchors the end
 
+// Keys Google's reference parser accepts, including its documented misspellings.
+const KEYS = {
+  "user-agent": "user-agent", useragent: "user-agent", "user agent": "user-agent",
+  allow: "allow",
+  disallow: "disallow", dissallow: "disallow", dissalow: "disallow", disalow: "disallow", diasllow: "disallow", disallaw: "disallow",
+};
+
+function splitLine(line) {
+  const idx = line.indexOf(":");
+  if (idx !== -1) return [line.slice(0, idx).trim().toLowerCase(), line.slice(idx + 1).trim()];
+  // "user-agent FooBot" with no colon is accepted, as in Google's parser.
+  const m = /^(user[- ]?agent|allow|disallow|dissallow|dissalow|disalow|diasllow|disallaw)\s+(.+)$/i.exec(line);
+  return m ? [m[1].toLowerCase(), m[2].trim()] : [null, null];
+}
+
+// The product token is the leading run of letters, "_" and "-": "GPTBot/1.1" and
+// "Foo Bar" name "gptbot" and "foo".
+function productToken(value) {
+  if (value.startsWith("*")) return "*";
+  const m = /^[A-Za-z_-]+/.exec(value);
+  return m ? m[0].toLowerCase() : "";
+}
+
 export function parseRobots(text) {
   const groups = [];
   let current = null;
-  let lastWasAgent = false;
+  let inAgentRun = false;
   for (const rawLine of String(text || "").replace(/^\uFEFF/, "").split(/\r\n|\r|\n/)) {
     const line = rawLine.replace(/#.*$/, "").trim();
     if (!line) continue;
-    const idx = line.indexOf(":");
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim().toLowerCase();
-    const value = line.slice(idx + 1).trim();
+    const [rawKey, value] = splitLine(line);
+    const key = KEYS[rawKey];
     if (key === "user-agent") {
-      if (!current || !lastWasAgent) {
+      if (!current || !inAgentRun) {
         current = { agents: [], rules: [] };
         groups.push(current);
       }
-      // "GPTBot/1.1" and "GPTBot" name the same product token.
-      current.agents.push(value.split("/")[0].trim().toLowerCase());
-      lastWasAgent = true;
+      const token = productToken(value);
+      if (token) current.agents.push(token);
+      inAgentRun = true;
     } else if (key === "allow" || key === "disallow") {
-      lastWasAgent = false;
+      // Only rules end a run of user-agent lines. Sitemap, crawl-delay and unknown
+      // lines are ignored and do not split a group.
+      inAgentRun = false;
       if (!current) continue;
       current.rules.push({ allow: key === "allow", path: normalizePath(value) });
-    } else {
-      lastWasAgent = false;
     }
   }
   return groups;
 }
 
-// RFC 9309 compares percent-encoded forms: decode what is safe to decode, then encode
-// everything outside the unreserved set the same way on both sides.
+// RFC 9309 compares percent-encoded forms: encode everything outside the allowed set
+// the same way on both sides.
 export function normalizePath(p) {
   let out = "";
   for (let i = 0; i < p.length; i++) {
     const ch = p[i];
     if (ch === "%" && /^[0-9a-f]{2}$/i.test(p.slice(i + 1, i + 3))) {
-      const decoded = String.fromCharCode(parseInt(p.slice(i + 1, i + 3), 16));
-      out += /[A-Za-z0-9\-._~]/.test(decoded) ? decoded : "%" + p.slice(i + 1, i + 3).toUpperCase();
+      // Escapes are kept, only their hex is uppercased. Like Google's parser, an
+      // encoded letter (%62) does not match the plain letter (b).
+      out += "%" + p.slice(i + 1, i + 3).toUpperCase();
       i += 2;
     } else if (/[A-Za-z0-9\-._~!$&'()*+,;=:@\/?#[\]]/.test(ch)) {
       out += ch;

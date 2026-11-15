@@ -48,7 +48,8 @@ test("percent-encoding is normalized on both sides", () => {
   assert.equal(isAllowed(g, "GPTBot", "/caf%C3%A9/menu").allowed, false);
   assert.equal(isAllowed(g, "GPTBot", "/café/menu").allowed, false);
   assert.equal(isAllowed(g, "GPTBot", "/a%2Fb").allowed, false);
-  assert.equal(normalizePath("/%7Euser"), "/~user");
+  // Escapes keep their form (hex uppercased); an encoded letter is not the letter.
+  assert.equal(normalizePath("/%7euser"), "/%7Euser");
 });
 
 test("robots.txt itself is always allowed", () => {

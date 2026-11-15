@@ -5,10 +5,11 @@
 // blocked; the rendered side is a normal page load.
 
 import puppeteer from "puppeteer";
-import { BROWSER_UA, MOBILE_UA } from "./agents.js";
 import { fetchRaw, xRobotsFor, splitCredentials } from "./fetch.js";
 import { extractSignals } from "./extract.js";
-import { compare } from "./diff.js";
+import { compare, renderVoice, serverVoice } from "./diff.js";
+
+const RANK = { critical: 3, warning: 2, info: 1 };
 
 // Every in-page step gets a deadline: a page script stuck in a loop blocks the page's
 // thread, and an await on it would otherwise never return.
@@ -61,6 +62,56 @@ async function unstick(page, guard, notes) {
 
 async function closeQuietly(page) {
   await withTimeout(page.close(), 5000, "closing the page").catch(() => {});
+}
+
+// Custom headers often carry secrets (preview bypass tokens, basic auth). Add them per
+// request, and only for the origin being checked: never for analytics, fonts, CDNs or a
+// redirect that leaves the site. setExtraHTTPHeaders would send them everywhere.
+async function scopeHeaders(page, url, headers) {
+  const origin = new URL(url).origin;
+  await page.setRequestInterception(true);
+  page.on("request", (req) => {
+    if (req.isInterceptResolutionHandled()) return;
+    let sameOrigin = false;
+    try {
+      sameOrigin = new URL(req.url()).origin === origin;
+    } catch {}
+    // A redirect hop inherits nothing: decide per request URL.
+    const base = { ...req.headers() };
+    for (const k of Object.keys(headers)) delete base[k.toLowerCase()];
+    req.continue({ headers: sameOrigin ? { ...base, ...headers } : base }).catch(() => {});
+  });
+}
+
+// A user agent that matches the Chrome actually running, with matching client hints.
+// Overriding the UA without metadata makes Chrome drop its sec-ch-ua headers, and bot
+// protection that checks them would then block the rendered side.
+export async function browserIdentity(browser, viewport) {
+  const version = (await browser.version()).replace(/^.*?\//, "") || "138.0.0.0";
+  const major = version.split(".")[0];
+  const mobile = viewport === "mobile";
+  const ua = mobile
+    ? `Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Mobile Safari/537.36`
+    : `Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`;
+  const brands = [
+    { brand: "Chromium", version: major },
+    { brand: "Google Chrome", version: major },
+    { brand: "Not.A/Brand", version: "99" },
+  ];
+  const metadata = {
+    brands,
+    fullVersionList: brands.map((b) => ({ ...b, version: b.brand === "Not.A/Brand" ? "99.0.0.0" : version })),
+    fullVersion: version,
+    platform: mobile ? "Android" : "Linux",
+    platformVersion: mobile ? "14.0.0" : "",
+    architecture: mobile ? "" : "x86",
+    model: mobile ? "Pixel 8" : "",
+    mobile,
+    bitness: mobile ? "" : "64",
+    wow64: false,
+  };
+  const chHeader = brands.map((b) => `"${b.brand}";v="${b.version}"`).join(", ");
+  return { ua, metadata, plainHeaders: { "sec-ch-ua": chHeader, "sec-ch-ua-mobile": mobile ? "?1" : "?0", "sec-ch-ua-platform": `"${metadata.platform}"` } };
 }
 
 const VIEWPORTS = {
@@ -168,7 +219,7 @@ async function autoScroll(page, maxMs = 4000) {
   }, maxMs);
 }
 
-async function readRendered(browser, url, { timeoutMs, settleMs, viewport, headers }) {
+async function readRendered(browser, url, { timeoutMs, settleMs, viewport, headers, identity }) {
   const page = await browser.newPage();
   const notes = [];
   const guard = await attachGuard(page);
@@ -178,9 +229,9 @@ async function readRendered(browser, url, { timeoutMs, settleMs, viewport, heade
     d.dismiss().catch(() => {});
   });
   try {
-    await page.setUserAgent(viewport === "mobile" ? MOBILE_UA : BROWSER_UA);
+    await page.setUserAgent(identity.ua, identity.metadata);
     await page.setViewport(VIEWPORTS[viewport] || VIEWPORTS.desktop);
-    if (Object.keys(headers).length) await page.setExtraHTTPHeaders(headers);
+    if (Object.keys(headers).length) await scopeHeaders(page, url, headers);
     let res = null;
     try {
       res = await page.goto(url, { waitUntil: "networkidle2", timeout: timeoutMs });
@@ -222,14 +273,14 @@ export async function renderGap(url, { agent, timeoutMs = 30000, settleMs = 1000
     // findings. A name that does not resolve is the caller's mistake, so it throws.
     if (/ENOTFOUND|EAI_AGAIN|Invalid URL/i.test(raw.error)) throw new Error(`cannot reach ${url}: ${raw.error}`);
     return {
-      version: 1, url, agent: agent.token, viewport,
+      version: 2, url, agent: agent.token, viewport,
       raw: { error: raw.error }, rendered: null, notes: [],
-      findings: [{ severity: "critical", signal: "access", message: `${agent.token} could not load the page: ${raw.error}.` }],
+      findings: [{ severity: "critical", layer: "access", signal: "access", message: `${agent.token} could not load the page: ${raw.error}.` }],
     };
   }
 
   const result = {
-    version: 1,
+    version: 2,
     url,
     agent: agent.token,
     viewport,
@@ -245,24 +296,66 @@ export async function renderGap(url, { agent, timeoutMs = 30000, settleMs = 1000
   if (raw.challenge) blockers.push(`${agent.token} was served a bot challenge page instead of the content.`);
   if (!raw.isHtml) blockers.push(`${agent.token} got ${raw.contentType || "a non-HTML response"}, not HTML.`);
   if (blockers.length) {
-    result.findings = blockers.map((message) => ({ severity: "critical", signal: "access", message }));
+    result.findings = blockers.map((message) => ({ severity: "critical", layer: "access", signal: "access", message }));
     return result;
   }
   if (raw.truncated) result.notes.push("raw response was larger than 15 MB and was cut off");
 
+  // Reading B: the same URL as a normal browser, still without JavaScript. Comparing
+  // the crawler's HTML (A) with B shows how the server treats the crawler; comparing B
+  // with the rendered page (C) shows what JavaScript adds. Without B those two causes
+  // would be blended and a server-side difference would be blamed on JavaScript.
   const own = !browser;
   browser = browser || (await launchBrowser());
   try {
+    // B uses the same identity as the rendered page, so A vs B differs only in user agent
+    // and B vs C differs only in JavaScript.
+    const identity = await browserIdentity(browser, viewport);
+    const plain = await fetchRaw(url, { userAgent: identity.ua, timeoutMs, headers: { ...identity.plainHeaders, ...headers } });
+    const plainUsable = plain.ok && plain.status < 400 && !plain.challenge && plain.isHtml;
     const rawSignals = await readRaw(browser, raw.body, raw.finalUrl);
-    const rendered = await readRendered(browser, url, { timeoutMs, settleMs, viewport, headers });
+    const plainSignals = plainUsable ? await readRaw(browser, plain.body, plain.finalUrl) : null;
+    const rendered = await readRendered(browser, url, { timeoutMs, settleMs, viewport, headers, identity });
     result.notes.push(...rendered.notes);
     result.raw.signals = strip(rawSignals);
+    result.browserHtml = plainUsable
+      ? { status: plain.status, finalUrl: plain.finalUrl, bytes: plain.bytes, signals: strip(plainSignals) }
+      : { status: plain.ok ? plain.status : null, error: plain.ok ? undefined : plain.error, usable: false };
     result.rendered = { status: rendered.status, finalUrl: rendered.finalUrl, signals: strip(rendered.signals) };
-    result.findings = compare(rawSignals, rendered.signals);
+
+    if (plainUsable) {
+      result.findings = [
+        ...compare(rawSignals, plainSignals, serverVoice(agent.token)),
+        ...compare(plainSignals, rendered.signals, renderVoice),
+      ];
+      // The reverse direction: the crawler gets noticeably more than browsers do.
+      if (plainSignals.wordCount >= 50 && rawSignals.wordCount > plainSignals.wordCount * 1.25) {
+        result.findings.push({
+          severity: "info",
+          layer: "server",
+          signal: "extraForCrawler",
+          message: `${agent.token} is sent more text than browsers (${rawSignals.wordCount} vs ${plainSignals.wordCount} words). Check that both get the same content.`,
+        });
+      }
+    } else {
+      result.notes.push(
+        "the plain browser request was blocked or failed, so server differences and JavaScript differences could not be separated; findings below compare the crawler's HTML with the rendered page directly",
+      );
+      result.findings = compare(rawSignals, rendered.signals, renderVoice).map((f) => ({ ...f, layer: "combined" }));
+    }
+    result.findings.sort((x, y) => RANK[y.severity] - RANK[x.severity]);
+
+    const total = rendered.signals.wordCount;
+    result.summary = {
+      crawlerWords: rawSignals.wordCount,
+      browserHtmlWords: plainUsable ? plainSignals.wordCount : null,
+      renderedWords: total,
+      crawlerShareOfRendered: total ? Math.min(100, Math.round((rawSignals.wordCount / total) * 100)) : null,
+    };
 
     const directives = xRobotsFor(raw.xRobotsTag, agent.token);
     if (directives.includes("noindex") || directives.includes("none")) {
-      result.findings.unshift({ severity: "critical", signal: "xRobotsTag", message: `The response tells ${agent.token} not to index this page (X-Robots-Tag: ${raw.xRobotsTag}).` });
+      result.findings.unshift({ severity: "critical", layer: "access", signal: "xRobotsTag", message: `The response tells ${agent.token} not to index this page (X-Robots-Tag: ${raw.xRobotsTag}).` });
     }
     if (rendered.status && rendered.status >= 400) {
       result.notes.push(`the browser got HTTP ${rendered.status}; check the URL or pass --header for protected previews`);
@@ -270,9 +363,10 @@ export async function renderGap(url, { agent, timeoutMs = 30000, settleMs = 1000
     if (!samePage(raw.finalUrl, rendered.finalUrl)) {
       result.findings.unshift({
         severity: "warning",
+        layer: "access",
         signal: "redirect",
         message: "The crawler and the browser ended up on different URLs, so they are not reading the same page.",
-        items: [`raw: ${raw.finalUrl}`, `rendered: ${rendered.finalUrl}`],
+        items: [`${agent.token}: ${raw.finalUrl}`, `browser: ${rendered.finalUrl}`],
       });
     }
     return result;

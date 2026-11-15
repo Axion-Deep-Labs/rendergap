@@ -1,5 +1,5 @@
 name: "rendergap"
-description: "Fail the build when key page content only appears after JavaScript runs, or when AI crawlers are blocked."
+description: "Fail the build when crawlers get less than visitors: content that needs JavaScript, thinner HTML for bots, or blocked crawler user agents."
 author: "Axion Deep Labs"
 branding:
   icon: "eye"

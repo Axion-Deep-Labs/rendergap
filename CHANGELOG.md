@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0
+
+Changes prompted by an outside review.
+
+- **Security: custom headers and URL credentials are scoped to the checked origin.** Before this release, `--header` values (for example a preview bypass token) were sent with every request the browser made, including third-party scripts, images and beacons, and both the plain fetch and the browser carried them across cross-origin redirects. They are now added per request for the original origin only and dropped on any redirect that leaves it. `test/leak.test.js` proves no secret reaches a second origin. If you passed secrets with `--header` or the Action's `headers` input on 0.2.0 or earlier against pages that load third-party resources, rotate them.
+- **Method: three readings instead of two.** The render gap used to compare the crawler's HTML with the rendered page, which changed two things at once (user agent and JavaScript), so a server sending bots a thinner page was reported as a JavaScript problem. rendergap now also reads the HTML a real browser receives and reports server differences and JavaScript differences separately. JSON output is version 2 with a `layer` on every finding and a `summary`.
+- The rendered page and the plain browser request now send a user agent that matches the running Chrome, with matching client hints. Before, overriding the user agent dropped Chrome's client hints, and bot protection that checks them could block the rendered page.
+- robots.txt parsing now passes a port of Google's reference conformance cases: unknown and Sitemap lines no longer split a group, user-agent values are read up to the first non-token character ("Foo Bar" means "foo"), lines without a colon and Google's documented misspellings are accepted, and percent-encoded characters are no longer decoded (`%62` does not match `b`).
+- Clearer output grouped by cause, correct plurals, and a summary that does not report more than 100%.
+- Test servers no longer keep the process alive when a name filter skips their tests.
+
+
 ## 0.2.0
 
 Hardening pass: every protection below has a hostile-page test, and each was verified by breaking it on purpose and watching a test fail.

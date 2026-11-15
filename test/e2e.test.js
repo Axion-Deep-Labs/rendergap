@@ -28,10 +28,11 @@ before(async () => {
     res.end(fixture(page));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  server.unref();
   origin = `http://127.0.0.1:${server.address().port}`;
 });
 
-after(() => server.close());
+after(() => server?.close());
 
 test("crawler check reads robots.txt and server blocks", async () => {
   const r = await checkCrawlers(`${origin}/`, { delayMs: 0 });

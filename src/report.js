@@ -10,24 +10,45 @@ const bold = (s) => c(1, s);
 
 const MARK = { critical: red("CRITICAL"), warning: yellow("WARNING "), info: dim("INFO    ") };
 
+const LAYERS = [
+  ["access", (r) => "Access"],
+  ["server", (r) => `How the server treats ${r.agent} (its HTML vs a browser's HTML, both before JavaScript)`],
+  ["render", () => "What JavaScript adds (browser HTML vs the rendered page)"],
+  ["combined", (r) => `${r.agent}'s HTML vs the rendered page (causes not separated)`],
+];
+
 export function formatGap(r) {
   const out = [];
   out.push(bold(`rendergap: ${r.url}`));
-  const words = r.raw.signals ? `, ${r.raw.signals.wordCount} words` : "";
-  out.push(dim(r.raw.error ? `raw fetch as ${r.agent}: failed` : `raw fetch as ${r.agent}: HTTP ${r.raw.status}, ${r.raw.bytes} bytes${words}`));
-  if (r.rendered) out.push(dim(`rendered in Chrome (${r.viewport}): HTTP ${r.rendered.status}, ${r.rendered.signals.wordCount} words`));
+  if (r.raw.error) out.push(dim(`${r.agent} HTML: request failed`));
+  else out.push(dim(`${r.agent} HTML: HTTP ${r.raw.status}, ${r.raw.bytes} bytes${r.raw.signals ? `, ${r.raw.signals.wordCount} words` : ""}`));
+  if (r.browserHtml?.signals) out.push(dim(`browser HTML: HTTP ${r.browserHtml.status}, ${r.browserHtml.bytes} bytes, ${r.browserHtml.signals.wordCount} words`));
+  if (r.rendered) out.push(dim(`rendered page (${r.viewport}): HTTP ${r.rendered.status}, ${r.rendered.signals.wordCount} words`));
+  const sm = r.summary;
+  if (sm?.renderedWords) {
+    out.push(
+      sm.crawlerWords >= sm.renderedWords
+        ? `${r.agent}'s HTML already holds as much text as a visitor sees (${sm.crawlerWords} words before JavaScript, ${sm.renderedWords} after).`
+        : `${r.agent}'s HTML carries ${sm.crawlerShareOfRendered}% of the text a visitor sees (${sm.crawlerWords} of ${sm.renderedWords} words).`,
+    );
+  }
   for (const n of r.notes || []) out.push(dim(`note: ${n}`));
   out.push("");
   if (!r.findings.length) {
-    out.push(green("No gap found. What a browser shows is also in the raw HTML."));
+    out.push(green(`No gap found. ${r.agent} gets the same HTML as a browser, and what a browser shows is already in that HTML.`));
     return out.join("\n");
   }
-  for (const f of r.findings) {
-    out.push(`${MARK[f.severity]}  ${f.message}`);
-    for (const item of f.items || []) out.push(dim(`          - ${item}`));
+  for (const [layer, title] of LAYERS) {
+    const group = r.findings.filter((f) => (f.layer || "render") === layer);
+    if (!group.length) continue;
+    out.push(bold(title(r)));
+    for (const f of group) {
+      out.push(`${MARK[f.severity]}  ${f.message}`);
+      for (const item of f.items || []) out.push(dim(`          - ${item}`));
+    }
+    out.push("");
   }
   const n = (s) => r.findings.filter((f) => f.severity === s).length;
-  out.push("");
   out.push(`${n("critical")} critical, ${n("warning")} warning, ${n("info")} info`);
   return out.join("\n");
 }

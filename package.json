@@ -1,7 +1,7 @@
 {
   "name": "rendergap",
-  "version": "0.2.0",
-  "description": "See what AI crawlers miss on your page: compare raw HTML with the rendered page, and check which crawlers can reach it at all.",
+  "version": "0.3.0",
+  "description": "See what a non-JavaScript crawler receives from your page, what only appears after rendering, and whether major crawler user agents are blocked.",
   "type": "module",
   "bin": {
     "rendergap": "bin/rendergap.js"
