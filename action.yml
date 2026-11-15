@@ -1,0 +1,69 @@
+name: "rendergap"
+description: "Fail the build when key page content only appears after JavaScript runs, or when AI crawlers are blocked."
+author: "Axion Deep Labs"
+branding:
+  icon: "eye"
+  color: "orange"
+
+inputs:
+  urls:
+    description: "One URL per line. Usually a preview or staging deployment."
+    required: true
+  check:
+    description: "gap (raw HTML vs rendered), crawlers (who can reach it), or both"
+    required: false
+    default: "gap"
+  agent:
+    description: "Crawler whose raw fetch to compare in the gap check"
+    required: false
+    default: "gptbot"
+  fail-on:
+    description: "Gap check: critical, warning, info or never"
+    required: false
+    default: "critical"
+  fail-on-blocked:
+    description: "Crawler check: fail when any crawler is blocked (true or false)"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+    - name: Install rendergap
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        if [ -x /usr/bin/google-chrome ]; then export PUPPETEER_SKIP_DOWNLOAD=1; fi
+        npm ci --omit=dev --no-audit --no-fund
+    - name: Run rendergap
+      shell: bash
+      env:
+        RG_URLS: ${{ inputs.urls }}
+        RG_CHECK: ${{ inputs.check }}
+        RG_AGENT: ${{ inputs.agent }}
+        RG_FAIL_ON: ${{ inputs.fail-on }}
+        RG_FAIL_BLOCKED: ${{ inputs.fail-on-blocked }}
+        RG_BIN: ${{ github.action_path }}/bin/rendergap.js
+      run: |
+        if [ -x /usr/bin/google-chrome ]; then export CHROME_PATH=/usr/bin/google-chrome; fi
+        export NO_COLOR=1
+        status=0
+        while IFS= read -r url; do
+          url="$(echo "$url" | xargs)"
+          [ -z "$url" ] && continue
+          if [ "$RG_CHECK" = "gap" ] || [ "$RG_CHECK" = "both" ]; then
+            out="$(node "$RG_BIN" "$url" --agent "$RG_AGENT" --fail-on "$RG_FAIL_ON")" || status=1
+            echo "$out"
+            { echo '```'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$RG_CHECK" = "crawlers" ] || [ "$RG_CHECK" = "both" ]; then
+            flag="never"; [ "$RG_FAIL_BLOCKED" = "true" ] && flag="blocked"
+            out="$(node "$RG_BIN" crawlers "$url" --fail-on "$flag")" || status=1
+            echo "$out"
+            { echo '```'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        done <<< "$RG_URLS"
+        exit $status

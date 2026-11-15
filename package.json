@@ -1,0 +1,42 @@
+{
+  "name": "rendergap",
+  "version": "0.1.0",
+  "description": "See what AI crawlers miss on your page: compare raw HTML with the rendered page, and check which crawlers can reach it at all.",
+  "type": "module",
+  "bin": {
+    "rendergap": "bin/rendergap.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "action.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "seo",
+    "ai-crawlers",
+    "gptbot",
+    "javascript-rendering",
+    "robots.txt",
+    "ai-visibility",
+    "technical-seo",
+    "github-action"
+  ],
+  "author": "Axion Deep Labs, Inc. (https://www.axiondeepdigital.com)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Axion-Deep-Labs/rendergap.git"
+  },
+  "homepage": "https://github.com/Axion-Deep-Labs/rendergap#readme",
+  "dependencies": {
+    "puppeteer": "^24.10.0"
+  }
+}

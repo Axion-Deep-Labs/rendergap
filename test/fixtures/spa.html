@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Loading</title>
+</head>
+<body>
+<div id="root"></div>
+<script>
+  document.title = "Acme Plumbing | Las Cruces";
+  const ld = document.createElement("script");
+  ld.type = "application/ld+json";
+  ld.textContent = JSON.stringify({ "@context": "https://schema.org", "@type": "Plumber", name: "Acme Plumbing" });
+  document.head.appendChild(ld);
+  const para = "We repair water heaters, leaks and drains for homes and small businesses across the valley, usually the same day you call.";
+  document.getElementById("root").innerHTML =
+    "<h1>Acme Plumbing in Las Cruces</h1>" +
+    "<h2>Services</h2><p>" + para + "</p>" +
+    "<h2>Prices</h2><p>Drain cleaning starts at $129 and water heater installs start at $1,450 including haul away.</p>" +
+    "<p>Call <a href='tel:+15755550100'>(575) 555-0100</a> for a same day visit from a licensed plumber.</p>" +
+    Array.from({ length: 12 }, (_, i) => "<p>" + para + " Note " + i + ".</p>").join("");
+</script>
+</body>
+</html>
